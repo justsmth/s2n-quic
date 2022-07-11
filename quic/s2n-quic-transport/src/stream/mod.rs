@@ -6,6 +6,7 @@
 mod api;
 mod controller;
 mod incoming_connection_flow_controller;
+mod legacy_controller;
 mod manager;
 mod outgoing_connection_flow_controller;
 mod receive_stream;
@@ -19,7 +20,7 @@ mod stream_interests;
 pub(crate) mod contract;
 
 pub use api::*;
-pub use controller::Controller;
+pub use legacy_controller::Controller as LegacyController;
 pub use manager::AbstractStreamManager;
 pub use s2n_quic_core::stream::limits::Limits;
 pub use stream_events::StreamEvents;

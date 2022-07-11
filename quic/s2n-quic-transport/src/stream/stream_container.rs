@@ -382,7 +382,7 @@ impl<S: StreamTrait> StreamContainer<S> {
     pub fn with_stream<F, R>(
         &mut self,
         stream_id: StreamId,
-        controller: &mut stream::Controller,
+        controller: &mut stream::LegacyController,
         func: F,
     ) -> Option<R>
     where
@@ -429,7 +429,7 @@ impl<S: StreamTrait> StreamContainer<S> {
     ///
     /// The `stream::Controller` will be notified of streams that have been
     /// closed to allow for further streams to be opened.
-    pub fn finalize_done_streams(&mut self, controller: &mut stream::Controller) {
+    pub fn finalize_done_streams(&mut self, controller: &mut stream::LegacyController) {
         for stream in self.interest_lists.done_streams.take() {
             // Remove the Stream from `stream_map`
             let mut cursor = self.stream_map.find_mut(&stream.inner.borrow().stream_id());
@@ -481,7 +481,7 @@ impl<S: StreamTrait> StreamContainer<S> {
     /// closed to allow for further streams to be opened.
     pub fn iterate_frame_delivery_list<F>(
         &mut self,
-        controller: &mut stream::Controller,
+        controller: &mut stream::LegacyController,
         mut func: F,
     ) where
         F: FnMut(&mut S),
@@ -502,7 +502,7 @@ impl<S: StreamTrait> StreamContainer<S> {
     /// closed to allow for further streams to be opened.
     pub fn iterate_connection_flow_credits_list<F>(
         &mut self,
-        controller: &mut stream::Controller,
+        controller: &mut stream::LegacyController,
         mut func: F,
     ) where
         F: FnMut(&mut S) -> StreamContainerIterationResult,
@@ -523,7 +523,7 @@ impl<S: StreamTrait> StreamContainer<S> {
     /// closed to allow for further streams to be opened.
     pub fn iterate_stream_flow_credits_list<F>(
         &mut self,
-        controller: &mut stream::Controller,
+        controller: &mut stream::LegacyController,
         mut func: F,
     ) where
         F: FnMut(&mut S) -> StreamContainerIterationResult,
@@ -542,8 +542,11 @@ impl<S: StreamTrait> StreamContainer<S> {
     ///
     /// The `stream::Controller` will be notified of streams that have been
     /// closed to allow for further streams to be opened.
-    pub fn iterate_transmission_list<F>(&mut self, controller: &mut stream::Controller, mut func: F)
-    where
+    pub fn iterate_transmission_list<F>(
+        &mut self,
+        controller: &mut stream::LegacyController,
+        mut func: F,
+    ) where
         F: FnMut(&mut S) -> StreamContainerIterationResult,
     {
         iterate_interruptible!(
@@ -562,7 +565,7 @@ impl<S: StreamTrait> StreamContainer<S> {
     /// closed to allow for further streams to be opened.
     pub fn iterate_retransmission_list<F>(
         &mut self,
-        controller: &mut stream::Controller,
+        controller: &mut stream::LegacyController,
         mut func: F,
     ) where
         F: FnMut(&mut S) -> StreamContainerIterationResult,
@@ -581,7 +584,7 @@ impl<S: StreamTrait> StreamContainer<S> {
     ///
     /// The `stream::Controller` will be notified of streams that have been
     /// closed to allow for further streams to be opened.
-    pub fn iterate_streams<F>(&mut self, controller: &mut stream::Controller, mut func: F)
+    pub fn iterate_streams<F>(&mut self, controller: &mut stream::LegacyController, mut func: F)
     where
         F: FnMut(&mut S),
     {

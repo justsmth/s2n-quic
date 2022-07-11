@@ -13,7 +13,7 @@ use crate::{
     endpoint,
     recovery::RttEstimator,
     stream::{
-        controller::MAX_STREAMS_SYNC_FRACTION,
+        legacy_controller::MAX_STREAMS_SYNC_FRACTION,
         stream_impl::StreamConfig,
         stream_interests::{StreamInterestProvider, StreamInterests},
         testing::*,

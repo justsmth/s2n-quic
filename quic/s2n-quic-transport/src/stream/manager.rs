@@ -163,7 +163,7 @@ pub struct StreamManagerState<S> {
     /// Flow control credit manager for sending data
     pub(super) outgoing_connection_flow_controller: OutgoingConnectionFlowController,
     /// Controller for managing streams concurrency limits
-    stream_controller: stream::Controller,
+    stream_controller: stream::LegacyController,
     /// A container which contains all Streams
     streams: StreamContainer<S>,
     /// The next Stream ID which was not yet used for an initiated stream
@@ -418,7 +418,7 @@ impl<S: StreamTrait> AbstractStreamManager<S> {
                 outgoing_connection_flow_controller: OutgoingConnectionFlowController::new(
                     initial_peer_limits.max_data,
                 ),
-                stream_controller: stream::Controller::new(
+                stream_controller: stream::LegacyController::new(
                     local_endpoint_type,
                     initial_peer_limits,
                     initial_local_limits,
@@ -1029,7 +1029,7 @@ impl<S: StreamTrait> AbstractStreamManager<S> {
     /// Executes the given function using the stream controller
     pub fn with_stream_controller<F, R>(&mut self, func: F) -> R
     where
-        F: FnOnce(&mut stream::Controller) -> R,
+        F: FnOnce(&mut stream::LegacyController) -> R,
     {
         func(&mut self.inner.stream_controller)
     }
