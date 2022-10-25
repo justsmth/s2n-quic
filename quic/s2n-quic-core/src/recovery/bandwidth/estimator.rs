@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::time::Timestamp;
+use crate::{event, event::IntoEvent, recovery::congestion_controller::Publisher, time::Timestamp};
 use core::{
     cmp::{max, Ordering},
     time::Duration,
@@ -61,6 +61,17 @@ impl Bandwidth {
                 nanos_per_byte: interval.as_nanos() as u64 / bytes,
             }
         }
+    }
+
+    /// Represents the bandwidth as bytes per second
+    pub fn as_bytes_per_second(&self) -> u64 {
+        const ONE_SECOND_IN_NANOS: u64 = Duration::from_secs(1).as_nanos() as u64;
+
+        if *self == Bandwidth::INFINITY {
+            return u64::MAX;
+        }
+
+        ONE_SECOND_IN_NANOS / self.nanos_per_byte
     }
 }
 
@@ -170,6 +181,23 @@ impl RateSample {
     }
 }
 
+impl IntoEvent<event::builder::RateSample> for RateSample {
+    fn into_event(self) -> event::builder::RateSample {
+        event::builder::RateSample {
+            interval: self.interval.into_event(),
+            delivered_bytes: self.delivered_bytes.into_event(),
+            lost_bytes: self.lost_bytes.into_event(),
+            ecn_ce_count: self.ecn_ce_count.into_event(),
+            is_app_limited: self.is_app_limited.into_event(),
+            prior_delivered_bytes: self.prior_delivered_bytes.into_event(),
+            bytes_in_flight: self.bytes_in_flight.into_event(),
+            prior_lost_bytes: self.prior_lost_bytes.into_event(),
+            prior_ecn_ce_count: self.prior_ecn_ce_count.into_event(),
+            delivery_rate_bytes_per_second: self.delivery_rate().as_bytes_per_second().into_event(),
+        }
+    }
+}
+
 /// Bandwidth estimator as defined in [Delivery Rate Estimation](https://datatracker.ietf.org/doc/draft-cheng-iccrg-delivery-rate-estimation/)
 /// and [BBR Congestion Control](https://datatracker.ietf.org/doc/draft-cardwell-iccrg-bbr-congestion-control/).
 #[derive(Clone, Debug, Default)]
@@ -221,7 +249,8 @@ impl Estimator {
     /// Called when a packet is transmitted
     pub fn on_packet_sent(
         &mut self,
-        bytes_in_flight: u32,
+        prior_bytes_in_flight: u32,
+        sent_bytes: usize,
         app_limited: Option<bool>,
         now: Timestamp,
     ) -> PacketInfo {
@@ -241,12 +270,14 @@ impl Estimator {
         //#   P.delivered_time  = C.delivered_time
         //#   P.delivered       = C.delivered
         //#   P.is_app_limited  = (C.app_limited != 0)
-        if bytes_in_flight == 0 {
+        if prior_bytes_in_flight == 0 {
             self.first_sent_time = Some(now);
             self.delivered_time = Some(now);
         }
 
-        if app_limited.unwrap_or(false) {
+        let bytes_in_flight = prior_bytes_in_flight.saturating_add(sent_bytes as u32);
+
+        if app_limited.unwrap_or(true) {
             self.on_app_limited(bytes_in_flight);
         }
 
@@ -270,12 +301,13 @@ impl Estimator {
     //# rate sample based on a snapshot of connection delivery information from the time
     //# at which the packet was last transmitted.
     /// Called for each acknowledgement of one or more packets
-    pub fn on_ack(
+    pub fn on_ack<Pub: Publisher>(
         &mut self,
         bytes_acknowledged: usize,
         newest_acked_time_sent: Timestamp,
         newest_acked_packet_info: PacketInfo,
         now: Timestamp,
+        publisher: &mut Pub,
     ) {
         self.delivered_bytes += bytes_acknowledged as u64;
         self.delivered_time = Some(now);
@@ -318,6 +350,8 @@ impl Estimator {
         // so the values are up to date even when no loss or ECN CE markings are received.
         self.rate_sample.lost_bytes = self.lost_bytes - self.rate_sample.prior_lost_bytes;
         self.rate_sample.ecn_ce_count = self.ecn_ce_count - self.rate_sample.prior_ecn_ce_count;
+
+        publisher.on_delivery_rate_sampled(self.rate_sample);
     }
 
     /// Called when packets are declared lost
@@ -325,6 +359,22 @@ impl Estimator {
     pub fn on_loss(&mut self, lost_bytes: usize) {
         self.lost_bytes += lost_bytes as u64;
         self.rate_sample.lost_bytes = self.lost_bytes - self.rate_sample.prior_lost_bytes;
+
+        // Move the app-limited period earlier as the lost bytes will not be delivered
+        if let Some(ref mut app_limited_delivered_bytes) = self.app_limited_delivered_bytes {
+            *app_limited_delivered_bytes =
+                app_limited_delivered_bytes.saturating_sub(lost_bytes as u64)
+        }
+    }
+
+    /// Called when packets are discarded
+    #[inline]
+    pub fn on_packet_discarded(&mut self, bytes_sent: usize) {
+        // Move the app-limited period earlier as the discarded bytes will not be delivered
+        if let Some(ref mut app_limited_delivered_bytes) = self.app_limited_delivered_bytes {
+            *app_limited_delivered_bytes =
+                app_limited_delivered_bytes.saturating_sub(bytes_sent as u64)
+        }
     }
 
     /// Called each time explicit congestion is recorded

@@ -1,7 +1,13 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::recovery::bbr::{BbrCongestionController, State};
+use crate::{
+    event::builder::SlowStartExitCause,
+    recovery::{
+        bbr::{BbrCongestionController, State},
+        congestion_controller::Publisher,
+    },
+};
 use num_rational::Ratio;
 
 //= https://tools.ietf.org/id/draft-cardwell-iccrg-bbr-congestion-control-02#2.6
@@ -18,7 +24,7 @@ pub(crate) const CWND_GAIN: Ratio<u64> = Ratio::new_raw(2, 1);
 impl BbrCongestionController {
     /// Enter the `Startup` state
     #[inline]
-    pub(super) fn enter_startup(&mut self) {
+    pub(super) fn enter_startup<Pub: Publisher>(&mut self, publisher: &mut Pub) {
         //= https://tools.ietf.org/id/draft-cardwell-iccrg-bbr-congestion-control-02#4.3.1.1
         //# BBREnterStartup():
         //#   BBR.state = Startup
@@ -29,12 +35,12 @@ impl BbrCongestionController {
 
         // New BBR state requires updating the model
         self.try_fast_path = false;
-        self.state.transition_to(State::Startup);
+        self.state.transition_to(State::Startup, publisher);
     }
 
     /// Checks if the `Startup` state is done and enters `Drain` if so
     #[inline]
-    pub(super) fn check_startup_done(&mut self) {
+    pub(super) fn check_startup_done<Pub: Publisher>(&mut self, publisher: &mut Pub) {
         //= https://tools.ietf.org/id/draft-cardwell-iccrg-bbr-congestion-control-02#4.3.1.1
         //# BBRCheckStartupDone():
         //#   BBRCheckStartupFullBandwidth()
@@ -54,12 +60,16 @@ impl BbrCongestionController {
             // in tcp_bbr2.c/bbr2_check_loss_too_high_in_startup
             //
             // See https://github.com/google/bbr/blob/1a45fd4faf30229a3d3116de7bfe9d2f933d3562/net/ipv4/tcp_bbr2.c#L2133
-            self.full_pipe_estimator
-                .on_loss_round_start(self.bw_estimator.rate_sample(), self.max_datagram_size)
+            self.full_pipe_estimator.on_loss_round_start(
+                self.bw_estimator.rate_sample(),
+                self.congestion_state.loss_bursts_in_round(),
+                self.max_datagram_size,
+            )
         }
 
         if self.state.is_startup() && self.full_pipe_estimator.filled_pipe() {
-            self.enter_drain();
+            publisher.on_slow_start_exited(SlowStartExitCause::Other, self.cwnd);
+            self.enter_drain(publisher);
         }
     }
 }
@@ -68,19 +78,22 @@ impl BbrCongestionController {
 mod tests {
     use super::*;
     use crate::{
+        event, path,
         path::MINIMUM_MTU,
-        recovery::{bandwidth::PacketInfo, bbr::probe_rtt},
+        recovery::{bandwidth::PacketInfo, bbr::probe_rtt, congestion_controller::PathPublisher},
         time::{Clock, NoopClock},
     };
 
     #[test]
     fn enter_startup() {
         let mut bbr = BbrCongestionController::new(MINIMUM_MTU);
+        let mut publisher = event::testing::Publisher::snapshot();
+        let mut publisher = PathPublisher::new(&mut publisher, path::Id::test_id());
 
         // Startup can only be re-entered from ProbeRtt
         bbr.state = State::ProbeRtt(probe_rtt::State::default());
 
-        bbr.enter_startup();
+        bbr.enter_startup(&mut publisher);
 
         assert!(bbr.state.is_startup());
         assert!(!bbr.try_fast_path);
@@ -96,12 +109,14 @@ mod tests {
     #[test]
     fn check_startup_done() {
         let mut bbr = BbrCongestionController::new(MINIMUM_MTU);
+        let mut publisher = event::testing::Publisher::snapshot();
+        let mut publisher = PathPublisher::new(&mut publisher, path::Id::test_id());
 
         // Not in startup
         bbr.state = State::ProbeRtt(probe_rtt::State::default());
         bbr.full_pipe_estimator.set_filled_pipe_for_test(true);
 
-        bbr.check_startup_done();
+        bbr.check_startup_done(&mut publisher);
 
         assert!(bbr.state.is_probing_rtt());
 
@@ -109,19 +124,21 @@ mod tests {
         bbr.full_pipe_estimator.set_filled_pipe_for_test(false);
 
         // Filled pipe = false
-        bbr.check_startup_done();
+        bbr.check_startup_done(&mut publisher);
         assert!(bbr.state.is_startup());
 
         // Now startup is done
         bbr.state = State::Startup;
         bbr.full_pipe_estimator.set_filled_pipe_for_test(true);
-        bbr.check_startup_done();
+        bbr.check_startup_done(&mut publisher);
         assert!(bbr.state.is_drain());
     }
 
     #[test]
     fn check_startup_done_filled_pipe_on_round_start() {
         let mut bbr = BbrCongestionController::new(MINIMUM_MTU);
+        let mut publisher = event::testing::Publisher::snapshot();
+        let mut publisher = PathPublisher::new(&mut publisher, path::Id::test_id());
         let now = NoopClock.get_time();
 
         // Set ECN state to be too high, which would cause the full pipe estimator to be filled
@@ -131,8 +148,8 @@ mod tests {
         assert!(!bbr.round_counter.round_start());
 
         // ECN must be too high over 2 rounds to fill the pipe
-        bbr.check_startup_done();
-        bbr.check_startup_done();
+        bbr.check_startup_done(&mut publisher);
+        bbr.check_startup_done(&mut publisher);
 
         // Still in startup since it wasn't the start of a round when ECN was measured
         assert!(!bbr.full_pipe_estimator.filled_pipe());
@@ -152,8 +169,8 @@ mod tests {
         assert!(bbr.round_counter.round_start());
 
         // ECN must be too high over 2 rounds to fill the pipe
-        bbr.check_startup_done();
-        bbr.check_startup_done();
+        bbr.check_startup_done(&mut publisher);
+        bbr.check_startup_done(&mut publisher);
 
         assert!(bbr.full_pipe_estimator.filled_pipe());
         assert!(bbr.state.is_drain());
@@ -162,16 +179,19 @@ mod tests {
     #[test]
     fn check_startup_done_filled_pipe_on_loss_round_start() {
         let mut bbr = BbrCongestionController::new(MINIMUM_MTU);
+        let mut publisher = event::testing::Publisher::snapshot();
+        let mut publisher = PathPublisher::new(&mut publisher, path::Id::test_id());
         let now = NoopClock.get_time();
 
         // Set loss to be too high, which would cause the full pipe estimator to be filled
         bbr.bw_estimator.on_loss(1000);
-        // 3 loss bursts must occur for the pipe to be full
-        bbr.full_pipe_estimator.on_packet_lost(true);
-        bbr.full_pipe_estimator.on_packet_lost(true);
-        bbr.full_pipe_estimator.on_packet_lost(true);
+        bbr.bw_estimator.set_delivered_bytes_for_test(100);
+        // 8 loss bursts must occur for the pipe to be full
+        for _ in 0..8 {
+            bbr.congestion_state.on_packet_lost(100, true);
+        }
         assert!(!bbr.congestion_state.loss_round_start());
-        bbr.check_startup_done();
+        bbr.check_startup_done(&mut publisher);
 
         // Still in startup since it wasn't the start of a loss round when loss was measured
         assert!(!bbr.full_pipe_estimator.filled_pipe());
@@ -189,7 +209,7 @@ mod tests {
         bbr.update_latest_signals(packet_info);
         assert!(bbr.congestion_state.loss_round_start());
 
-        bbr.check_startup_done();
+        bbr.check_startup_done(&mut publisher);
 
         assert!(bbr.full_pipe_estimator.filled_pipe());
         assert!(bbr.state.is_drain());

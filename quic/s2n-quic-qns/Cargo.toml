@@ -32,6 +32,10 @@ s2n-quic = { path = "../s2n-quic", features = ["provider-event-tracing", "provid
 [target.'cfg(not(unix))'.dependencies]
 s2n-quic = { path = "../s2n-quic", features = ["provider-event-tracing", "provider-tls-rustls"] }
 
+# the mimalloc build is currently broken on android
+[target.'cfg(not(target_os = "android"))'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
+
 # we don't use openssl-sys directly; it's just here to pin and vendor in dev
 [package.metadata.cargo-udeps.ignore]
 normal = [ "openssl-sys" ]

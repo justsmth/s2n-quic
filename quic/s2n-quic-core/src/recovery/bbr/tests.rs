@@ -4,12 +4,14 @@
 use crate::{
     assert_delta,
     counter::Counter,
+    event, path,
     path::MINIMUM_MTU,
     random,
     recovery::{
         bandwidth::{Bandwidth, PacketInfo, RateSample},
         bbr,
-        bbr::{probe_bw::CyclePhase, probe_rtt, BbrCongestionController, State, State::ProbeRtt},
+        bbr::{probe_bw::CyclePhase, probe_rtt, BbrCongestionController, State},
+        congestion_controller::{PathPublisher, Publisher},
         CongestionController,
     },
     time::{Clock, NoopClock},
@@ -17,6 +19,37 @@ use crate::{
 use num_rational::Ratio;
 use num_traits::{Inv, One, ToPrimitive};
 use std::time::Duration;
+
+//= https://tools.ietf.org/id/draft-cardwell-iccrg-bbr-congestion-control-02#4.5.6.3
+//= type=test
+//# When not explicitly accelerating to probe for bandwidth (Drain, ProbeRTT,
+//# ProbeBW_DOWN, ProbeBW_CRUISE), BBR responds to loss by slowing down to some extent.
+#[test]
+fn is_probing_for_bandwidth() {
+    let mut bbr = BbrCongestionController::new(MINIMUM_MTU);
+    let mut publisher = event::testing::Publisher::snapshot();
+    let mut publisher = PathPublisher::new(&mut publisher, path::Id::test_id());
+
+    // States that are not explicitly accelerating to probe for bandwidth
+    // ie Drain, ProbeRtt, ProbeBW_DOWN, ProbeBW_CRUISE
+    assert!(!State::Drain.is_probing_for_bandwidth());
+    assert!(!State::ProbeRtt(probe_rtt::State::default()).is_probing_for_bandwidth());
+
+    enter_probe_bw_state(&mut bbr, CyclePhase::Down, &mut publisher);
+    assert!(!bbr.state.is_probing_for_bandwidth());
+
+    enter_probe_bw_state(&mut bbr, CyclePhase::Cruise, &mut publisher);
+    assert!(!bbr.state.is_probing_for_bandwidth());
+
+    // States that are explicitly accelerating to probe for bandwidth
+    assert!(State::Startup.is_probing_for_bandwidth());
+
+    enter_probe_bw_state(&mut bbr, CyclePhase::Up, &mut publisher);
+    assert!(bbr.state.is_probing_for_bandwidth());
+
+    enter_probe_bw_state(&mut bbr, CyclePhase::Refill, &mut publisher);
+    assert!(bbr.state.is_probing_for_bandwidth());
+}
 
 //= https://tools.ietf.org/id/draft-cardwell-iccrg-bbr-congestion-control-02#4.5.6.2
 //= type=test
@@ -95,6 +128,9 @@ fn inflight_hi_from_lost_packet() {
 
 #[test]
 fn pacing_cwnd_gain() {
+    let mut publisher = event::testing::Publisher::snapshot();
+    let mut publisher = PathPublisher::new(&mut publisher, path::Id::test_id());
+
     //= https://tools.ietf.org/id/draft-cardwell-iccrg-bbr-congestion-control-02#2.6
     //= type=test
     //# A constant specifying the minimum gain value for calculating the pacing rate that will
@@ -125,8 +161,13 @@ fn pacing_cwnd_gain() {
 
     let mut bbr = BbrCongestionController::new(MINIMUM_MTU);
     let now = NoopClock.get_time();
-    bbr.enter_drain();
-    bbr.enter_probe_bw(false, &mut random::testing::Generator::default(), now);
+    bbr.enter_drain(&mut publisher);
+    bbr.enter_probe_bw(
+        false,
+        &mut random::testing::Generator::default(),
+        now,
+        &mut publisher,
+    );
     assert!(bbr.state.is_probing_bw());
 
     // ProbeBw cwnd gain from https://www.ietf.org/archive/id/draft-cardwell-iccrg-bbr-congestion-control-02.html#section-4.6.1
@@ -364,6 +405,8 @@ fn inflight_with_headroom() {
 #[test]
 fn quantization_budget() {
     let mut bbr = BbrCongestionController::new(MINIMUM_MTU);
+    let mut publisher = event::testing::Publisher::snapshot();
+    let mut publisher = PathPublisher::new(&mut publisher, path::Id::test_id());
     bbr.pacer.set_send_quantum_for_test(4000);
 
     let send_quantum = bbr.pacer.send_quantum();
@@ -383,7 +426,7 @@ fn quantization_budget() {
     // offload_budget < inflight < minimum_window
     assert_eq!(4800, bbr.quantization_budget(2000));
 
-    enter_probe_bw_state(&mut bbr, CyclePhase::Up);
+    enter_probe_bw_state(&mut bbr, CyclePhase::Up, &mut publisher);
     assert!(bbr.state.is_probing_bw_up());
 
     // since probe bw up, add 2 packets to the budget
@@ -397,10 +440,20 @@ fn is_inflight_too_high() {
         bytes_in_flight: 100,
         ..Default::default()
     };
-    // loss rate higher than 2% threshold
+    // loss rate higher than 2% threshold and loss bursts = limit
     assert!(BbrCongestionController::is_inflight_too_high(
         rate_sample,
-        MINIMUM_MTU
+        MINIMUM_MTU,
+        2,
+        2
+    ));
+
+    // loss rate higher than 2% threshold but loss bursts < limit
+    assert!(!BbrCongestionController::is_inflight_too_high(
+        rate_sample,
+        MINIMUM_MTU,
+        1,
+        2
     ));
 
     let rate_sample = RateSample {
@@ -411,7 +464,9 @@ fn is_inflight_too_high() {
     // loss rate <= 2% threshold
     assert!(!BbrCongestionController::is_inflight_too_high(
         rate_sample,
-        MINIMUM_MTU
+        MINIMUM_MTU,
+        2,
+        2
     ));
 
     let rate_sample = RateSample {
@@ -422,7 +477,9 @@ fn is_inflight_too_high() {
     // ecn rate higher than 50% threshold
     assert!(BbrCongestionController::is_inflight_too_high(
         rate_sample,
-        MINIMUM_MTU
+        MINIMUM_MTU,
+        0,
+        2
     ));
 
     let rate_sample = RateSample {
@@ -433,7 +490,9 @@ fn is_inflight_too_high() {
     // ecn rate <= 50% threshold
     assert!(!BbrCongestionController::is_inflight_too_high(
         rate_sample,
-        MINIMUM_MTU
+        MINIMUM_MTU,
+        0,
+        2,
     ));
 }
 
@@ -455,13 +514,15 @@ fn is_inflight_too_high() {
 #[test]
 fn bound_cwnd_for_model() {
     let mut bbr = BbrCongestionController::new(MINIMUM_MTU);
-    enter_probe_bw_state(&mut bbr, CyclePhase::Down);
+    let mut publisher = event::testing::Publisher::snapshot();
+    let mut publisher = PathPublisher::new(&mut publisher, path::Id::test_id());
+    enter_probe_bw_state(&mut bbr, CyclePhase::Down, &mut publisher);
 
     bbr.data_volume_model.update_upper_bound(10000);
 
     assert_eq!(10000, bbr.bound_cwnd_for_model());
 
-    enter_probe_bw_state(&mut bbr, CyclePhase::Cruise);
+    enter_probe_bw_state(&mut bbr, CyclePhase::Cruise, &mut publisher);
 
     // inflight_with_headroom = .85 * 10000 = 8500
     assert_eq!(8500, bbr.bound_cwnd_for_model());
@@ -486,31 +547,6 @@ fn bound_cwnd_for_model() {
     assert_eq!(4000, bbr.data_volume_model.inflight_lo());
 
     assert_eq!(4800, bbr.bound_cwnd_for_model());
-}
-
-//= https://tools.ietf.org/id/draft-cardwell-iccrg-bbr-congestion-control-02#4.6.4.4
-//= type=test
-//#   if (BBR.packet_conservation)
-//#     cwnd = max(cwnd, packets_in_flight + rs.newly_acked)
-#[test]
-fn set_cwnd_packet_conservation() {
-    let mut bbr = BbrCongestionController::new(MINIMUM_MTU);
-    let now = NoopClock.get_time();
-    assert_eq!(36_000, bbr.max_inflight());
-
-    bbr.recovery_state.on_congestion_event(now);
-    assert!(bbr.recovery_state.packet_conservation());
-
-    bbr.cwnd = 12_000;
-    bbr.bytes_in_flight = Counter::new(12_500);
-    bbr.set_cwnd(1000);
-    assert_eq!(13_500, bbr.cwnd);
-
-    bbr.cwnd = 14_000;
-    bbr.set_cwnd(1000);
-    assert_eq!(14_000, bbr.cwnd);
-
-    assert!(!bbr.try_fast_path);
 }
 
 //= https://tools.ietf.org/id/draft-cardwell-iccrg-bbr-congestion-control-02#4.6.4.6
@@ -543,6 +579,8 @@ fn set_cwnd_filled_pipe() {
 #[test]
 fn set_cwnd_not_filled_pipe() {
     let mut bbr = BbrCongestionController::new(MINIMUM_MTU);
+    let mut publisher = event::testing::Publisher::snapshot();
+    let mut publisher = PathPublisher::new(&mut publisher, path::Id::test_id());
     let now = NoopClock.get_time();
     assert_eq!(36_000, bbr.max_inflight());
 
@@ -552,12 +590,12 @@ fn set_cwnd_not_filled_pipe() {
     bbr.set_cwnd(1000);
     assert_eq!(13_000, bbr.cwnd);
 
-    // cwnd > BBR.max_inflight, but C.delivered < InitialCwnd
+    // cwnd > BBR.max_inflight, but C.delivered < 2 * InitialCwnd
     bbr.cwnd = 40_000;
     bbr.set_cwnd(1000);
     assert_eq!(41_000, bbr.cwnd);
 
-    // Set C.delivered > InitialCwnd
+    // Set C.delivered > 2 * InitialCwnd
     let packet_info = PacketInfo {
         delivered_bytes: 0,
         delivered_time: now,
@@ -568,10 +606,11 @@ fn set_cwnd_not_filled_pipe() {
         is_app_limited: false,
     };
     bbr.bw_estimator.on_ack(
-        BbrCongestionController::initial_window(MINIMUM_MTU) as usize + 1,
+        2 * BbrCongestionController::initial_window(MINIMUM_MTU) as usize + 1,
         now,
         packet_info,
         now,
+        &mut publisher,
     );
     bbr.cwnd = 12_000;
     bbr.set_cwnd(1000);
@@ -638,36 +677,17 @@ fn set_cwnd_clamp() {
 #[test]
 fn save_cwnd() {
     let mut bbr = BbrCongestionController::new(MINIMUM_MTU);
-
-    // Not in recovery
-    bbr.prior_cwnd = 1000;
-    bbr.cwnd = 2000;
-    bbr.save_cwnd();
-
-    assert_eq!(2000, bbr.prior_cwnd);
+    bbr.state = State::ProbeRtt(probe_rtt::State::default());
 
     bbr.prior_cwnd = 2000;
     bbr.cwnd = 1000;
     bbr.save_cwnd();
-    assert_eq!(1000, bbr.prior_cwnd);
-
-    // Enter probe RTT
-    bbr.state = ProbeRtt(probe_rtt::State::default());
-    assert!(bbr.state.is_probing_rtt());
-
-    bbr.prior_cwnd = 2000;
-    bbr.cwnd = 1000;
     assert_eq!(2000, bbr.prior_cwnd);
 
-    // Enter recovery
-    bbr.state = State::Startup;
-    let now = NoopClock.get_time();
-    bbr.recovery_state.on_congestion_event(now);
-    assert!(bbr.recovery_state.in_recovery());
-
-    bbr.prior_cwnd = 2000;
-    bbr.cwnd = 1000;
-    assert_eq!(2000, bbr.prior_cwnd);
+    bbr.prior_cwnd = 4000;
+    bbr.cwnd = 5000;
+    bbr.save_cwnd();
+    assert_eq!(5000, bbr.prior_cwnd);
 }
 
 //= https://tools.ietf.org/id/draft-cardwell-iccrg-bbr-congestion-control-02#4.6.4.4
@@ -677,6 +697,7 @@ fn save_cwnd() {
 #[test]
 fn restore_cwnd() {
     let mut bbr = BbrCongestionController::new(MINIMUM_MTU);
+    bbr.state = State::ProbeRtt(probe_rtt::State::default());
 
     bbr.prior_cwnd = 1000;
     bbr.cwnd = 2000;
@@ -691,25 +712,6 @@ fn restore_cwnd() {
     bbr.restore_cwnd();
 
     assert_eq!(2000, bbr.cwnd);
-}
-
-//= https://tools.ietf.org/id/draft-cardwell-iccrg-bbr-congestion-control-02#4.6.4.4
-//= type=test
-//# BBRModulateCwndForRecovery():
-//#   if (rs.newly_lost > 0)
-//#     cwnd = max(cwnd - rs.newly_lost, 1)
-#[test]
-fn modulate_cwnd_for_recovery() {
-    let mut bbr = BbrCongestionController::new(MINIMUM_MTU);
-    bbr.cwnd = 100_000;
-
-    bbr.modulate_cwnd_for_recovery(1000);
-    assert_eq!(99_000, bbr.congestion_window());
-
-    // Don't drop below the minimum window
-    bbr.cwnd = bbr.minimum_window();
-    bbr.modulate_cwnd_for_recovery(1000);
-    assert_eq!(bbr.minimum_window(), bbr.congestion_window());
 }
 
 //= https://tools.ietf.org/id/draft-cardwell-iccrg-bbr-congestion-control-02#4.6.4.4
@@ -721,41 +723,6 @@ fn modulate_cwnd_for_recovery() {
 //#   BBR.prior_cwnd = BBRSaveCwnd()
 //#   cwnd = packets_in_flight + max(rs.newly_acked, 1)
 //#   BBR.packet_conservation = true
-
-//= https://tools.ietf.org/id/draft-cardwell-iccrg-bbr-congestion-control-02#4.6.4.4
-//= type=test
-//# Upon exiting loss recovery (RTO recovery or Fast Recovery), either by repairing all
-//# losses or undoing recovery, BBR restores the best-known cwnd value we had upon entering
-//# loss recovery:
-//#
-//#   BBR.packet_conservation = false
-//#   BBRRestoreCwnd()
-#[test]
-fn on_enter_and_exit_fast_recovery() {
-    let mut bbr = BbrCongestionController::new(MINIMUM_MTU);
-    bbr.cwnd = 100_000;
-    bbr.bytes_in_flight = Counter::new(75_000);
-
-    // Enter recovery
-    let now = NoopClock.get_time();
-    bbr.recovery_state.on_congestion_event(now);
-    assert!(bbr.recovery_state.in_recovery());
-
-    bbr.on_enter_fast_recovery();
-
-    assert_eq!(75_000, bbr.congestion_window());
-
-    // Exit recovery
-    bbr.recovery_state
-        .on_ack(true, now + Duration::from_millis(1));
-    assert!(!bbr.recovery_state.in_recovery());
-    bbr.try_fast_path = true;
-
-    bbr.on_exit_fast_recovery();
-
-    assert_eq!(100_000, bbr.cwnd);
-    assert!(!bbr.try_fast_path)
-}
 
 //= https://tools.ietf.org/id/draft-cardwell-iccrg-bbr-congestion-control-02#4.5.6.2
 //= type=test
@@ -771,6 +738,8 @@ fn on_enter_and_exit_fast_recovery() {
 fn handle_lost_packet() {
     let mut bbr = BbrCongestionController::new(MINIMUM_MTU);
     let now = NoopClock.get_time();
+    let mut publisher = event::testing::Publisher::snapshot();
+    let mut publisher = PathPublisher::new(&mut publisher, path::Id::test_id());
     bbr.bw_probe_samples = true;
 
     bbr.bw_estimator.on_loss(1000);
@@ -785,12 +754,16 @@ fn handle_lost_packet() {
         is_app_limited: false,
     };
 
-    enter_probe_bw_state(&mut bbr, CyclePhase::Up);
+    enter_probe_bw_state(&mut bbr, CyclePhase::Up, &mut publisher);
+    // Two lost bursts to trigger inflight being too high
+    bbr.congestion_state.on_packet_lost(500, true);
+    bbr.congestion_state.on_packet_lost(500, true);
     bbr.handle_lost_packet(
         1000,
         lost_packet,
         &mut random::testing::Generator::default(),
         now,
+        &mut publisher,
     );
 
     let inflight_hi_from_lost_packet =
@@ -827,12 +800,16 @@ fn handle_lost_packet() {
         .update_min_rtt(Duration::from_millis(10), now);
     bbr.data_rate_model.update_max_bw(rate_sample);
     bbr.data_rate_model.bound_bw_for_model();
+    // Two lost bursts to trigger inflight being too high
+    bbr.congestion_state.on_packet_lost(500, true);
+    bbr.congestion_state.on_packet_lost(500, true);
 
     bbr.handle_lost_packet(
         1000,
         lost_packet,
         &mut random::testing::Generator::default(),
         now,
+        &mut publisher,
     );
 
     let inflight_hi_from_lost_packet =
@@ -860,10 +837,12 @@ fn handle_lost_packet() {
 #[test]
 fn handle_restart_from_idle() {
     let mut bbr = BbrCongestionController::new(MINIMUM_MTU);
+    let mut publisher = event::testing::Publisher::snapshot();
+    let mut publisher = PathPublisher::new(&mut publisher, path::Id::test_id());
     let now = NoopClock.get_time();
     let pacing_rate = bbr.pacer.pacing_rate();
 
-    bbr.handle_restart_from_idle(now);
+    bbr.handle_restart_from_idle(now, &mut publisher);
 
     // Not app limited
     assert!(!bbr.idle_restart);
@@ -871,13 +850,13 @@ fn handle_restart_from_idle() {
     // App limited, but bytes in flight > 0
     bbr.bytes_in_flight = Counter::new(1);
     bbr.bw_estimator.on_app_limited(100);
-    bbr.handle_restart_from_idle(now);
+    bbr.handle_restart_from_idle(now, &mut publisher);
 
     assert!(!bbr.idle_restart);
 
     bbr.bytes_in_flight = Counter::default();
 
-    bbr.handle_restart_from_idle(now);
+    bbr.handle_restart_from_idle(now, &mut publisher);
     assert!(bbr.idle_restart);
     assert_eq!(
         Some(now),
@@ -885,7 +864,7 @@ fn handle_restart_from_idle() {
     );
     assert_eq!(pacing_rate, bbr.pacer.pacing_rate());
 
-    enter_probe_bw_state(&mut bbr, CyclePhase::Down);
+    enter_probe_bw_state(&mut bbr, CyclePhase::Down, &mut publisher);
     let rate_sample = RateSample {
         delivered_bytes: 100_000,
         interval: Duration::from_millis(1),
@@ -896,7 +875,7 @@ fn handle_restart_from_idle() {
     assert!(bbr.data_rate_model.bw() > bbr.pacer.pacing_rate());
 
     let now = now + Duration::from_secs(5);
-    bbr.handle_restart_from_idle(now);
+    bbr.handle_restart_from_idle(now, &mut publisher);
     assert!(bbr.idle_restart);
     assert_eq!(
         Some(now),
@@ -973,7 +952,7 @@ fn model_update_required() {
     assert!(!bbr.model_update_required());
 
     // loss in round
-    bbr.congestion_state.on_packet_lost(100);
+    bbr.congestion_state.on_packet_lost(100, true);
     assert!(bbr.model_update_required());
     bbr.congestion_state.reset();
     assert!(!bbr.model_update_required());
@@ -1021,10 +1000,13 @@ fn control_update_required() {
 fn on_mtu_update() {
     let mut mtu = 5000;
     let mut bbr = BbrCongestionController::new(mtu);
+    let mut publisher = event::testing::Publisher::snapshot();
+    let mut publisher = PathPublisher::new(&mut publisher, path::Id::test_id());
+
     bbr.cwnd = 100_000;
 
     mtu = 10000;
-    bbr.on_mtu_update(mtu);
+    bbr.on_mtu_update(mtu, &mut publisher);
 
     assert_eq!(bbr.max_datagram_size, mtu);
     assert_eq!(bbr.cwnd, 200_000);
@@ -1032,16 +1014,30 @@ fn on_mtu_update() {
 
 /// Helper method to move the given BBR congestion controller into the
 /// ProbeBW state with the given CyclePhase
-fn enter_probe_bw_state(bbr: &mut BbrCongestionController, cycle_phase: CyclePhase) {
+fn enter_probe_bw_state<Pub: Publisher>(
+    bbr: &mut BbrCongestionController,
+    cycle_phase: CyclePhase,
+    publisher: &mut Pub,
+) {
     let now = NoopClock.get_time();
 
     match bbr.state {
         State::Startup => {
-            bbr.enter_drain();
-            bbr.enter_probe_bw(false, &mut random::testing::Generator::default(), now);
+            bbr.enter_drain(publisher);
+            bbr.enter_probe_bw(
+                false,
+                &mut random::testing::Generator::default(),
+                now,
+                publisher,
+            );
         }
         State::Drain | State::ProbeRtt(_) => {
-            bbr.enter_probe_bw(false, &mut random::testing::Generator::default(), now);
+            bbr.enter_probe_bw(
+                false,
+                &mut random::testing::Generator::default(),
+                now,
+                publisher,
+            );
         }
         State::ProbeBw(_) => {}
     }
