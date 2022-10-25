@@ -52,7 +52,8 @@ futures = { version = "0.3", default-features = false, features = ["std"] }
 hash_hasher = { version = "2", optional = true }
 rand = "0.8"
 rand_chacha = "0.3"
-ring = { version = "0.16", optional = true, default-features = false }
+#ring = { version = "0.16", optional = true, default-features = false }
+ring = {path = "../../../aws-lc-ring-facade", optional = true, package = "aws-lc-ring-facade"}
 s2n-codec = { version = "=0.1.0", path = "../../common/s2n-codec" }
 s2n-quic-core = { version = "=0.10.1", path = "../s2n-quic-core" }
 s2n-quic-platform = { version = "=0.10.1", path = "../s2n-quic-platform", features = ["tokio-runtime"] }

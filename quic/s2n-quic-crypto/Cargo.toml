@@ -17,7 +17,8 @@ testing = []
 [dependencies]
 cfg-if = "1"
 lazy_static = "1"
-ring = { version = "0.16", default-features = false }
+#ring = { version = "0.16", default-features = false }
+ring = { path = "../../../aws-lc-ring-facade", package = "aws-lc-ring-facade"}
 s2n-codec = { version = "=0.1.0", path = "../../common/s2n-codec", default-features = false }
 s2n-quic-core = { version = "=0.10.1", path = "../s2n-quic-core", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["zeroize_derive"] }
