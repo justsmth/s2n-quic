@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{aead::Aead, header_key::HeaderKey, iv};
-use ::ring::{aead, hkdf};
+use s2n_quic_ring::{aead, hkdf};
 use core::fmt;
 use s2n_quic_core::{
     assume,

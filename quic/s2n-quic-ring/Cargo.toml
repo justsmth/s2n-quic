@@ -1,0 +1,18 @@
+[package]
+name = "s2n-quic-ring"
+version = "0.1.0"
+description = "Internal crate used by s2n-quic"
+repository = "https://github.com/aws/s2n-quic"
+authors = ["AWS s2n"]
+edition = "2021"
+rust-version = "1.63"
+license = "Apache-2.0"
+
+[target.'cfg(any(all(target_os = "macos", target_arch = "x86_64"), all(target_os = "linux", target_arch = "x86_64"), all(target_os = "linux", target_arch = "aarch64")))'.dependencies]
+aws-lc-rs = { version = "1.0.0", default-features = false, features = ["aws-lc-sys"] }
+
+[target.'cfg(all(unix, not(any(all(target_os = "macos", target_arch = "x86_64"), all(target_os = "linux", target_arch = "x86_64"), all(target_os = "linux", target_arch = "aarch64")))))'.dependencies]
+aws-lc-rs = { version = "1.0.0", default-features = false, features = ["bindgen", "aws-lc-sys"] }
+
+[target.'cfg(not(unix))'.dependencies]
+ring = { version = "0.16.20", default-features = false }

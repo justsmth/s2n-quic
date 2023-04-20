@@ -16,9 +16,10 @@ mod ctr;
 mod ghash;
 mod iv;
 
+pub use s2n_quic_ring as ring;
+
 #[doc(hidden)]
 pub use ring::{
-    self,
     aead::{Algorithm, MAX_TAG_LEN},
     hkdf::Prk,
 };

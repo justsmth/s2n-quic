@@ -30,7 +30,7 @@ impl crypto::OneRttHeaderKey for OneRttHeaderKey {}
 mod tests {
     use crate::cipher_suite::TLS_CHACHA20_POLY1305_SHA256;
     use hex_literal::hex;
-    use ring::hkdf;
+    use s2n_quic_ring::hkdf;
     use s2n_quic_core::crypto::Key;
 
     //= https://www.rfc-editor.org/rfc/rfc9001#appendix-A.5

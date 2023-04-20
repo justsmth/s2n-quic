@@ -6,7 +6,7 @@ use crate::{
     header_key::HeaderKey,
 };
 use core::fmt;
-use ring::{aead, hkdf};
+use s2n_quic_ring::{aead, hkdf};
 use s2n_quic_core::crypto::{self, CryptoError};
 
 // ignore casing warnings in order to preserve the IANA name
