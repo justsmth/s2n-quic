@@ -1,8 +1,8 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use s2n_quic_ring::hkdf;
 use s2n_codec::{Encoder, EncoderBuffer};
+use s2n_quic_ring::hkdf;
 use zeroize::Zeroize;
 
 pub use s2n_quic_ring::aead::NONCE_LEN;

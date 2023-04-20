@@ -6,8 +6,8 @@ use crate::{
     header_key::HeaderKey,
 };
 use core::fmt;
-use s2n_quic_ring::{aead, hkdf};
 use s2n_quic_core::crypto::{self, CryptoError};
+use s2n_quic_ring::{aead, hkdf};
 
 // ignore casing warnings in order to preserve the IANA name
 #[allow(non_camel_case_types, clippy::all)]

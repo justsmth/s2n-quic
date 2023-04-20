@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{aead::Aead, header_key::HeaderKey, iv};
-use s2n_quic_ring::{aead, hkdf};
 use core::fmt;
 use s2n_quic_core::{
     assume,
     crypto::{label, CryptoError},
 };
+use s2n_quic_ring::{aead, hkdf};
 use zeroize::{Zeroize, Zeroizing};
 
 mod negotiated;

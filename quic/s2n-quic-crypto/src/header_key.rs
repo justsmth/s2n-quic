@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use core::fmt;
-use s2n_quic_ring::{aead, hkdf};
 use s2n_quic_core::crypto::{self, HeaderProtectionMask};
+use s2n_quic_ring::{aead, hkdf};
 
 pub struct HeaderKey(pub(crate) aead::quic::HeaderProtectionKey);
 

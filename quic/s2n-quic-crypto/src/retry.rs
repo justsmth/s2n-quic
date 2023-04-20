@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use core::convert::TryInto;
-use s2n_quic_ring::aead;
 use s2n_quic_core::crypto::{
     self,
     retry::{IntegrityTag, NONCE_BYTES, SECRET_KEY_BYTES},
     CryptoError,
 };
+use s2n_quic_ring::aead;
 
 lazy_static::lazy_static! {
     /// Compute the Initial salt once, as the seed is constant

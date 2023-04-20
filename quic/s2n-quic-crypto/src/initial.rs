@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{cipher_suite::TLS_AES_128_GCM_SHA256 as CipherSuite, header_key::HeaderKeyPair};
-use s2n_quic_ring::hkdf;
 use s2n_quic_core::{
     crypto::{
         self,
@@ -11,6 +10,7 @@ use s2n_quic_core::{
     },
     endpoint,
 };
+use s2n_quic_ring::hkdf;
 
 header_key!(InitialHeaderKey);
 
