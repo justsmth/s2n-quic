@@ -16,7 +16,6 @@ mod ctr;
 mod ghash;
 mod iv;
 
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 use aws_lc_rs as ring;
 
 #[doc(hidden)]
