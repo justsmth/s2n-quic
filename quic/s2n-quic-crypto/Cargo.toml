@@ -21,7 +21,8 @@ s2n-codec = { version = "=0.5.0", path = "../../common/s2n-codec", default-featu
 s2n-quic-core = { version = "=0.20.0", path = "../s2n-quic-core", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["derive"] }
 
-aws-lc-rs = { version = "1.0.0", default-features = false, features = ["aws-lc-sys"] }
+#aws-lc-rs = { version = "1.0.0", default-features = false, features = ["aws-lc-sys"] }
+aws-lc-rs = { version = "1.0.0", path = "../../../aws-lc-rs/aws-lc-rs", default-features = false, features = ["aws-lc-sys"] }
 
 [dev-dependencies]
 aes = "0.8"
